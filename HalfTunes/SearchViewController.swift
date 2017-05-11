@@ -29,13 +29,14 @@ class SearchViewController: UIViewController {
     
     // MARK: View controller methods
     lazy var downloadsSession: URLSession = {
-        let configuration = URLSessionConfiguration.default
+        let configuration = URLSessionConfiguration.background(withIdentifier: "bgSessionConfiguration")
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         return session
     }()
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        _ = self.downloadsSession
         tableView.tableFooterView = UIView()
         
     }
@@ -106,17 +107,42 @@ class SearchViewController: UIViewController {
     
     // Called when the Pause button for a track is tapped
     func pauseDownload(_ track: Track) {
-        // TODO
+        if let urlString = track.previewUrl,
+            let download = activeDownloads[urlString] {
+            if(download.isDownloading) {
+                download.downloadTask?.cancel { data in
+                    if data != nil {
+                        download.resumeData = data! as NSData
+                    }
+                }
+                download.isDownloading = false
+            }
+        }
     }
     
     // Called when the Cancel button for a track is tapped
     func cancelDownload(_ track: Track) {
-        // TODO
+        if let urlString = track.previewUrl,
+            let download = activeDownloads[urlString] {
+            download.downloadTask?.cancel()
+            activeDownloads[urlString] = nil
+        }
     }
     
     // Called when the Resume button for a track is tapped
     func resumeDownload(_ track: Track) {
-        // TODO
+        if let urlString = track.previewUrl,
+            let download = activeDownloads[urlString] {
+            if let resumeData = download.resumeData {
+                download.downloadTask = downloadsSession.downloadTask(withResumeData: resumeData as Data)
+                download.downloadTask!.resume()
+                download.isDownloading = true
+            } else if let url = NSURL(string: download.url) {
+                download.downloadTask = downloadsSession.downloadTask(with: url as URL)
+                download.downloadTask!.resume()
+                download.isDownloading = true
+            }
+        }
     }
     
     // This method attempts to play the local file (if it exists) when the cell is tapped
@@ -269,11 +295,26 @@ extension SearchViewController: UITableViewDataSource {
         // Configure title and artist labels
         cell.titleLabel.text = track.name
         cell.artistLabel.text = track.artist
+        //Monitoring Download Progress
+        var showDownloadControls = false
+        if let download = activeDownloads[track.previewUrl!] {
+            let title = (download.isDownloading) ? "Pause" : "Resume"
+            cell.pauseButton.setTitle(title, for: .normal)
+            showDownloadControls = true
+            
+            cell.progressView.progress = download.progress
+            cell.progressLabel.text = (download.isDownloading) ? "Downloading..." : "Paused"
+        }
+        cell.progressView.isHidden = !showDownloadControls
+        cell.progressLabel.isHidden = !showDownloadControls
         
         // If the track is already downloaded, enable cell selection and hide the Download button
         let downloaded = localFileExistsForTrack(track)
         cell.selectionStyle = downloaded ? UITableViewCellSelectionStyle.gray : UITableViewCellSelectionStyle.none
-        cell.downloadButton.isHidden = downloaded
+        cell.downloadButton.isHidden = downloaded || showDownloadControls
+        
+        cell.pauseButton.isHidden = !showDownloadControls
+        cell.cancelButton.isHidden = !showDownloadControls
         
         return cell
     }
@@ -327,6 +368,40 @@ extension SearchViewController: URLSessionDownloadDelegate {
             if let trackIndex = trackIndexForDownloadTask(downloadTask: downloadTask) {
                 DispatchQueue.main.async(execute: {
                     self.tableView.reloadRows(at: [NSIndexPath(row: trackIndex, section: 0) as IndexPath], with: .none)
+                })
+            }
+        }
+    }
+    
+    private func URLSession(session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        
+        // 1
+        let downloadUrl = downloadTask.originalRequest?.url?.absoluteString
+        let download = activeDownloads[downloadUrl!]
+        // 2
+        download?.progress = Float(totalBytesWritten)/Float(totalBytesExpectedToWrite)
+        // 3
+        let totalSize = ByteCountFormatter.string(fromByteCount: totalBytesExpectedToWrite, countStyle: ByteCountFormatter.CountStyle.binary)
+        // 4
+        if let trackIndex = trackIndexForDownloadTask(downloadTask: downloadTask), let trackCell = tableView.cellForRow(at: NSIndexPath(row: trackIndex, section: 0) as IndexPath) as? TrackCell {
+            DispatchQueue.main.async(execute: {
+                trackCell.progressView.progress = (download?.progress)!
+                trackCell.progressLabel.text =  String(format: "%.1f%% of %@",  (download?.progress)! * 100, totalSize)
+            })
+        }
+        
+    }
+    
+}
+
+extension SearchViewController: URLSessionDelegate {
+    
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        if let appDelegate = UIApplication.shared.delegate as? AppDelegate {
+            if let completionHandler = appDelegate.backgroundSessionCompletionHandler {
+                appDelegate.backgroundSessionCompletionHandler = nil
+                DispatchQueue.main.async(execute: {
+                    completionHandler()
                 })
             }
         }
